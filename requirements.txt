@@ -1,5 +1,4 @@
 fastapi==0.104.1
 uvicorn[standard]==0.24.0
-torch==2.1.0
 transformers==4.35.2
 requests==2.31.0
