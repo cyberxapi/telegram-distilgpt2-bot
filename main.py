@@ -2,13 +2,11 @@ import os
 import logging
 import time
 from typing import Optional
-from functools import lru_cache
 
-from fastapi import FastAPI, Query, HTTPException
+from fastapi import FastAPI, Query
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
-import torch
-from transformers import AutoTokenizer, AutoModelForCausalLM
+from transformers import pipeline
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -30,34 +28,25 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Global variables for model caching
-_tokenizer = None
-_model = None
-_device = None
+# Global variable for pipeline caching
+_pipeline = None
 
-def get_device():
-    """Get the device (CPU/CUDA) to run the model on."""
-    global _device
-    if _device is None:
-        _device = "cuda" if torch.cuda.is_available() else "cpu"
-        logger.info(f"Using device: {_device}")
-    return _device
-
-def load_model():
-    """Load tokenizer and model with lazy loading."""
-    global _tokenizer, _model
-    if _tokenizer is None or _model is None:
+def get_pipeline():
+    """Get or create the text generation pipeline."""
+    global _pipeline
+    if _pipeline is None:
         try:
-            logger.info("Loading DistilGPT2 model...")
-            _tokenizer = AutoTokenizer.from_pretrained("distilgpt2")
-            _model = AutoModelForCausalLM.from_pretrained("distilgpt2")
-            _model.to(get_device())
-            _model.eval()
-            logger.info("Model loaded successfully")
+            logger.info("Loading DistilGPT2 pipeline...")
+            _pipeline = pipeline(
+                "text-generation",
+                model="distilgpt2",
+                device=-1  # -1 means CPU only
+            )
+            logger.info("Pipeline loaded successfully")
         except Exception as e:
-            logger.error(f"Failed to load model: {str(e)}")
+            logger.error(f"Failed to load pipeline: {str(e)}")
             raise
-    return _tokenizer, _model
+    return _pipeline
 
 def generate_response(
     prompt: str,
@@ -67,7 +56,7 @@ def generate_response(
     num_beams: int = 1
 ) -> str:
     """
-    Generate text using DistilGPT2 model.
+    Generate text using DistilGPT2 model via transformers pipeline.
     
     Args:
         prompt: Input text to generate from
@@ -79,28 +68,21 @@ def generate_response(
     Returns:
         Generated text response
     """
-    tokenizer, model = load_model()
-    device = get_device()
-    
     try:
-        # Tokenize input
-        inputs = tokenizer.encode(prompt, return_tensors="pt").to(device)
+        pipe = get_pipeline()
         
         # Generate with constraints
-        with torch.no_grad():
-            output = model.generate(
-                inputs,
-                max_length=min(max_length, 200),  # Cap at 200 tokens
-                temperature=max(0.1, min(temperature, 2.0)),  # Clamp temperature
-                top_p=max(0.1, min(top_p, 1.0)),  # Clamp top_p
-                num_beams=max(1, min(num_beams, 4)),  # Clamp beams
-                pad_token_id=tokenizer.eos_token_id,
-                attention_mask=torch.ones_like(inputs),
-                do_sample=True if num_beams == 1 else False,
-            )
+        outputs = pipe(
+            prompt,
+            max_length=min(max_length + len(prompt.split()), 200),
+            temperature=max(0.1, min(temperature, 2.0)),
+            top_p=max(0.1, min(top_p, 1.0)),
+            num_beams=max(1, min(num_beams, 4)),
+            do_sample=True if num_beams == 1 else False,
+        )
         
-        # Decode output
-        response = tokenizer.decode(output[0], skip_special_tokens=True)
+        # Extract the generated text
+        response = outputs[0]['generated_text']
         return response
     
     except Exception as e:
@@ -111,10 +93,10 @@ def generate_response(
 async def startup_event():
     """Pre-load model on startup."""
     try:
-        load_model()
-        logger.info("Startup: Model pre-loaded successfully")
+        get_pipeline()
+        logger.info("Startup: Pipeline pre-loaded successfully")
     except Exception as e:
-        logger.warning(f"Startup: Model pre-loading failed: {str(e)}")
+        logger.warning(f"Startup: Pipeline pre-loading failed: {str(e)}")
 
 @app.get("/")
 async def root():
@@ -192,11 +174,10 @@ async def chat(
 async def health_check():
     """Detailed health check endpoint."""
     try:
-        load_model()
+        get_pipeline()
         return {
             "status": "healthy",
             "model_loaded": True,
-            "device": get_device(),
             "timestamp": time.time()
         }
     except Exception as e:
@@ -215,7 +196,6 @@ async def get_available_models():
     return {
         "available_models": ["distilgpt2"],
         "current_model": "distilgpt2",
-        "device": get_device(),
         "description": "DistilGPT2 - Lightweight, fast text generation model"
     }
 
